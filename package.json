@@ -1,0 +1,10 @@
+{
+  "name": "opencode-easyclaude-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.mjs",
+  "files": ["index.mjs", "models.mjs", "README.md"],
+  "scripts": {"test": "node --test test/*.test.mjs"},
+  "magpie": {"name": "EasyClaude"}
+}
