@@ -114,7 +114,7 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
 
   async function request(url, init, label, webEnvelope = true) {
     try {
-      const response = await fetchImpl(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20000) });
+      const response = await fetchImpl(url, { ...init, credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(20000) });
       return await jsonResponse(response, label, webEnvelope);
     } catch (error) {
       if (error instanceof ServiceError) throw error;
@@ -157,8 +157,11 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
         }, 'EasyClaude 余额查询');
         return usageOf(result.data);
       } catch (error) {
-        if (!error.sessionExpired || attempt > 0) throw error;
+        if (!error.sessionExpired) throw error;
+        // Forget even the final rejected session, without removing a newer
+        // session another concurrent balance query may already have created.
         if (sessions.get(sessionId(key)) === current) sessions.delete(sessionId(key));
+        if (attempt > 0) throw error;
       }
     }
   }
@@ -190,7 +193,12 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
               || !REQUEST_PATHS.has(url.pathname) || method.toUpperCase() !== 'POST') {
               throw new ServiceError('EasyClaude 插件拒绝向非指定日本节点或未知接口发送密钥');
             }
+            const signal = request?.signal ?? init.signal;
+            signal?.throwIfAborted();
             const key = apiKey(await getAuth());
+            // Account loading can await disk I/O. Do not start a billed
+            // request after the caller canceled while that was in flight.
+            signal?.throwIfAborted();
             const headers = new Headers(request ? request.headers : init.headers);
             for (const name of [...headers.keys()]) {
               if (['authorization', 'x-api-key', 'cookie', 'host', 'content-length', 'origin', 'referer', 'proxy-authorization'].includes(name) || name.startsWith('x-magpie-')) headers.delete(name);
@@ -200,9 +208,11 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
               headers.set('x-api-key', key);
               if (!headers.has('anthropic-version')) headers.set('anthropic-version', '2023-06-01');
             }
-            const options = { ...init, method, headers, redirect: 'error', signal: request?.signal ?? init.signal };
+            const options = { ...init, method, headers, credentials: 'omit', redirect: 'error', signal };
             if (request) options.body = request.body;
             if (options.body instanceof ReadableStream) options.duplex = 'half';
+            // No buffering, stream rewriting or automatic retries here: keep
+            // timing, backpressure and HTTP errors under the host's control.
             return fetchImpl(url.href, options);
           },
         };
@@ -223,13 +233,13 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
           headers: { authorization: `Bearer ${key}`, 'x-api-key': key },
         }, 'EasyClaude 模型列表', false);
         if (!Array.isArray(result?.data) || !result.data.length) throw new ServiceError('EasyClaude 模型列表为空或格式错误');
-        const models = {};
+        const models = Object.create(null);
         for (const item of result.data) {
           if (typeof item?.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(item.id)) continue;
           const id = item.id;
-          const previous = provider.models?.[id] ?? {};
+          const previous = Object.hasOwn(provider.models ?? {}, id) ? (provider.models[id] ?? {}) : {};
           models[id] = {
-            ...previous, id, providerID: PROVIDER, name: item.name ?? id, status: 'active',
+            ...previous, id, providerID: PROVIDER, name: typeof item.name === 'string' && item.name.trim() ? item.name : id, status: 'active',
             api: { id, url: API, npm: modelPackage(id) },
             limit: previous.limit ?? { context: 0, output: 0 },
             capabilities: previous.capabilities ?? { toolcall: true, input: { text: true }, output: { text: true } },
